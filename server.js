@@ -1,20 +1,15 @@
-import dotenv from 'dotenv'
 import express from 'express'
-
+import dotenv from 'dotenv'
 dotenv.config()
 
 import authRoutes from './src/routes/auth.js'
+import profileRoutes from './src/routes/profile.js' // ⬅️ Import new route
 
 const app = express()
 app.use(express.json())
 
-// Ping test
-app.get('/ping', (req, res) => res.send('pong'))
-
-// Routes
 app.use('/auth', authRoutes)
+app.use('/profile', profileRoutes) // ⬅️ Protected route
 
 const PORT = process.env.PORT || 3000
-app.listen(PORT, () => {
-  console.log(`✅ Server running on http://localhost:${PORT}`)
-})
+app.listen(PORT, () => console.log(`✅ Server running on http://localhost:${PORT}`))

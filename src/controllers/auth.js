@@ -1,117 +1,120 @@
+import jwt from 'jsonwebtoken'
 import supabase from '../config/supabase.js'
 
-const pendingRegistrations = new Map()
-const pendingLogins = new Map()
+const tempUsers = new Map()
 
-const generateOTP = () => Math.floor(100000 + Math.random() * 900000)
-
-// ✅ Email format validator
-function isValidEmail(email) {
-  return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)
-}
-
-// ✅ Block disposable domains
-const blockedDomains = ['mailinator.com', 'tempmail.com', 'example.com']
-function isBlockedDomain(email) {
-  const domain = email.split('@')[1]
-  return blockedDomains.includes(domain)
-}
-
-export const registerUser = async (req, res) => {
-  const { firstName, lastName, email, phone, password, confirmPassword, referralCode } = req.body
-
-  if (!isValidEmail(email)) {
-    return res.status(400).json({ error: 'Invalid email format' })
-  }
-
-  if (isBlockedDomain(email)) {
-    return res.status(400).json({ error: 'Temporary email domains not allowed' })
-  }
+export const registerDetails = async (req, res) => {
+  const { firstname, lastname, email, phone, password, confirmPassword, referralCode } = req.body
 
   if (password !== confirmPassword) {
     return res.status(400).json({ error: 'Passwords do not match' })
   }
 
-  if (password.length < 6) {
-    return res.status(400).json({ error: 'Password must be at least 6 characters' })
-  }
-
-  const otp = generateOTP()
-  const expiresAt = Date.now() + 15 * 60 * 1000
-
-  pendingRegistrations.set(email, {
+  const otp = Math.floor(100000 + Math.random() * 900000)
+  tempUsers.set(email, {
     otp,
-    expiresAt,
-    data: { firstName, lastName, email, phone, password, referralCode }
+    user: { firstname, lastname, email, phone, password, referralCode }
   })
 
   console.log(`📨 OTP for registration [${email}]: ${otp}`)
-  res.json({ success: true, message: 'OTP sent to email' })
+  return res.json({ message: 'OTP sent to email' })
 }
 
 export const verifyRegisterOtp = async (req, res) => {
   const { email, otp } = req.body
-  const stored = pendingRegistrations.get(email)
+  const record = tempUsers.get(email)
 
-  if (!stored || stored.otp !== parseInt(otp)) {
+  if (!record || record.otp !== parseInt(otp)) {
     return res.status(400).json({ error: 'Invalid or expired OTP' })
   }
 
-  if (Date.now() > stored.expiresAt) {
-    pendingRegistrations.delete(email)
-    return res.status(400).json({ error: 'OTP expired' })
-  }
+  const { firstname, lastname, password, phone, referralCode } = record.user
 
-  const { firstName, lastName, phone, password, referralCode } = stored.data
-  const { data, error } = await supabase.auth.signUp({ email, password })
+  const { data, error } = await supabase.auth.signUp({
+    email,
+    password
+  })
 
   if (error) return res.status(400).json({ error: error.message })
 
   await supabase.from('profiles').insert({
     user_id: data.user.id,
     email,
-    first_name: firstName,
-    last_name: lastName,
-    phone,
-    referral_code: referralCode
+    user_verified: false,
+    kyc: false
   })
 
-  pendingRegistrations.delete(email)
-  res.json({ success: true, message: 'User registered', data })
+  tempUsers.delete(email)
+
+  return res.json({ message: 'User registered. Please verify email.', user: data.user })
 }
 
-export const loginUser = async (req, res) => {
+export const loginDetails = async (req, res) => {
   const { email, password } = req.body
 
   const { data, error } = await supabase.auth.signInWithPassword({ email, password })
 
   if (error) {
-    console.log('[DEBUG] Login error:', error)
-    return res.status(401).json({ error: 'Invalid email or password' })
+    return res.status(400).json({ error: 'Invalid email or password' })
   }
 
-  const otp = generateOTP()
+  const otp = Math.floor(100000 + Math.random() * 900000)
   const expiresAt = Date.now() + 15 * 60 * 1000
 
-  pendingLogins.set(email, { otp, expiresAt, session: data.session })
+  tempUsers.set(email, { otp, expiresAt, password })
+
   console.log(`📨 OTP for login [${email}]: ${otp}`)
 
-  res.json({ success: true, message: 'OTP sent for login' })
+  return res.json({ message: 'OTP sent successfully' })
 }
 
 export const verifyLoginOtp = async (req, res) => {
   const { email, otp } = req.body
-  const stored = pendingLogins.get(email)
+  const stored = tempUsers.get(email)
 
-  if (!stored || stored.otp !== parseInt(otp)) {
+  if (!stored || stored.otp !== otp) {
     return res.status(400).json({ error: 'Invalid or expired OTP' })
   }
 
-  if (Date.now() > stored.expiresAt) {
-    pendingLogins.delete(email)
-    return res.status(400).json({ error: 'OTP expired' })
-  }
+  try {
+    const { data, error } = await supabase.auth.signInWithPassword({
+      email,
+      password: stored.password
+    })
 
-  pendingLogins.delete(email)
-  res.json({ success: true, message: 'Login successful', session: stored.session })
+    if (error) {
+      console.log('[DEBUG] Login error:', error)
+      return res.status(400).json({ error: error.message })
+    }
+
+    tempUsers.delete(email)
+
+    const token = jwt.sign(
+      { id: data.user.id, email: data.user.email },
+      process.env.JWT_SECRET,
+      { expiresIn: '24h' }
+    )
+
+    // ✅ Fetch KYC status from Supabase "profiles" table
+    const { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('kyc')
+      .eq('user_id', data.user.id)
+      .single()
+
+    if (profileError) {
+      console.log('[DEBUG] Profile fetch error:', profileError)
+    }
+
+    return res.json({
+      message: 'Login successful',
+      token,
+      user: data.user,
+      email_verified: !!(data.user.email_confirmed_at || data.user.confirmed_at),
+      kyc: profile?.kyc || false
+    })
+  } catch (err) {
+    console.error('[DEBUG] OTP verify login error:', err)
+    return res.status(500).json({ error: 'Server error' })
+  }
 }
