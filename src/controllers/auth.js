@@ -1,22 +1,58 @@
 import jwt from 'jsonwebtoken'
 import supabase from '../config/supabase.js'
+import { v4 as uuidv4 } from 'uuid'
 
 const tempUsers = new Map()
+
+// ✅ Generate a unique referral code
+async function generateUniqueReferralCode(prefix = 'REF') {
+  let unique = false
+  let newReferralCode
+
+  while (!unique) {
+    newReferralCode = `${prefix}${Math.floor(100000 + Math.random() * 900000)}`
+    const { data } = await supabase
+      .from('profiles')
+      .select('referral_code')
+      .eq('referral_code', newReferralCode)
+      .single()
+
+    if (!data) unique = true
+  }
+
+  return newReferralCode
+}
 
 export const registerDetails = async (req, res) => {
   const { firstname, lastname, email, phone, password, confirmPassword, referralCode } = req.body
 
-  if (!firstname || !lastname) {
-    return res.status(400).json({ error: 'First name and last name are required' })
+  if (!firstname || !lastname || !email || !password || !confirmPassword) {
+    return res.status(400).json({ error: 'All fields are required' })
   }
 
   if (password !== confirmPassword) {
     return res.status(400).json({ error: 'Passwords do not match' })
   }
 
-  const otp = Math.floor(100000 + Math.random() * 900000)
+  // ✅ Lookup referrer by referral code (if provided)
+  let referredBy = null
+  if (referralCode) {
+    const { data: referrer, error: referrerError } = await supabase
+      .from('profiles')
+      .select('user_id')
+      .eq('referral_code', referralCode)
+      .single()
 
-  // ✅ Save all user details including names
+    if (referrer) {
+      referredBy = referrer.user_id
+    }
+  }
+
+  // ✅ Generate a unique referral code
+  const newReferralCode = await generateUniqueReferralCode()
+
+  // ✅ Store details temporarily with OTP
+  const otp = Math.floor(100000 + Math.random() * 900000)
   tempUsers.set(email, {
     otp,
     user: {
@@ -25,14 +61,14 @@ export const registerDetails = async (req, res) => {
       email,
       phone,
       password,
-      referralCode
+      referralCode: newReferralCode,
+      referredBy
     }
   })
 
   console.log(`📨 OTP for registration [${email}]: ${otp}`)
   return res.json({ message: 'OTP sent to email' })
 }
-
 
 export const verifyRegisterOtp = async (req, res) => {
   const { email, otp } = req.body
@@ -42,9 +78,9 @@ export const verifyRegisterOtp = async (req, res) => {
     return res.status(400).json({ error: 'Invalid or expired OTP' })
   }
 
-  const { firstname, lastname, password, phone, referralCode } = record.user
+  const { firstname, lastname, password, phone, referralCode, referredBy } = record.user
 
-  // Sign up the user with Supabase Auth
+  // ✅ Sign up in Supabase Auth
   const { data, error } = await supabase.auth.signUp({
     email,
     password
@@ -54,7 +90,7 @@ export const verifyRegisterOtp = async (req, res) => {
     return res.status(400).json({ error: error.message })
   }
 
-  // ✅ Mark user as verified
+  // ✅ Insert into profiles table
   const { error: profileError } = await supabase.from('profiles').insert({
     user_id: data.user.id,
     email,
@@ -62,7 +98,8 @@ export const verifyRegisterOtp = async (req, res) => {
     lastname,
     phone,
     referral_code: referralCode,
-    user_verified: true,   // ✅ Set true after email verification
+    referred_by: referredBy, // UID of the referrer
+    user_verified: true,
     kyc: false
   })
 
@@ -73,11 +110,10 @@ export const verifyRegisterOtp = async (req, res) => {
   tempUsers.delete(email)
 
   return res.json({
-    message: 'User registered. Email verified successfully.',
+    message: 'User registered and verified',
     user: data.user
   })
 }
-
 
 export const loginDetails = async (req, res) => {
   const { email, password } = req.body
@@ -125,7 +161,6 @@ export const verifyLoginOtp = async (req, res) => {
       { expiresIn: '24h' }
     )
 
-    // ✅ Fetch KYC status from Supabase "profiles" table
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
       .select('kyc')
@@ -133,7 +168,7 @@ export const verifyLoginOtp = async (req, res) => {
       .single()
 
     if (profileError) {
-      console.log('[DEBUG] Profile fetch error:', profileError)
+      console.log('[DEBUG] Profile fetch error:', profileError.message)
     }
 
     return res.json({
