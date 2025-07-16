@@ -6,19 +6,33 @@ const tempUsers = new Map()
 export const registerDetails = async (req, res) => {
   const { firstname, lastname, email, phone, password, confirmPassword, referralCode } = req.body
 
+  if (!firstname || !lastname) {
+    return res.status(400).json({ error: 'First name and last name are required' })
+  }
+
   if (password !== confirmPassword) {
     return res.status(400).json({ error: 'Passwords do not match' })
   }
 
   const otp = Math.floor(100000 + Math.random() * 900000)
+
+  // ✅ Save all user details including names
   tempUsers.set(email, {
     otp,
-    user: { firstname, lastname, email, phone, password, referralCode }
+    user: {
+      firstname,
+      lastname,
+      email,
+      phone,
+      password,
+      referralCode
+    }
   })
 
   console.log(`📨 OTP for registration [${email}]: ${otp}`)
   return res.json({ message: 'OTP sent to email' })
 }
+
 
 export const verifyRegisterOtp = async (req, res) => {
   const { email, otp } = req.body
@@ -30,24 +44,40 @@ export const verifyRegisterOtp = async (req, res) => {
 
   const { firstname, lastname, password, phone, referralCode } = record.user
 
+  // Sign up the user with Supabase Auth
   const { data, error } = await supabase.auth.signUp({
     email,
     password
   })
 
-  if (error) return res.status(400).json({ error: error.message })
+  if (error) {
+    return res.status(400).json({ error: error.message })
+  }
 
-  await supabase.from('profiles').insert({
+  // ✅ Mark user as verified
+  const { error: profileError } = await supabase.from('profiles').insert({
     user_id: data.user.id,
     email,
-    user_verified: false,
+    firstname,
+    lastname,
+    phone,
+    referral_code: referralCode,
+    user_verified: true,   // ✅ Set true after email verification
     kyc: false
   })
 
+  if (profileError) {
+    return res.status(500).json({ error: 'Failed to save user profile' })
+  }
+
   tempUsers.delete(email)
 
-  return res.json({ message: 'User registered. Please verify email.', user: data.user })
+  return res.json({
+    message: 'User registered. Email verified successfully.',
+    user: data.user
+  })
 }
+
 
 export const loginDetails = async (req, res) => {
   const { email, password } = req.body
