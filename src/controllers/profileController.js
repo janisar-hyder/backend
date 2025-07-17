@@ -1,4 +1,4 @@
-// src/controllers/profileController.js
+// src/controllers/profileControllers.js
 import supabase from '../config/supabase.js'
 
 export const getProfile = async (req, res) => {
@@ -16,9 +16,12 @@ export const getProfile = async (req, res) => {
       return res.status(404).json({ error: 'Profile not found' })
     }
 
-    return res.json({ profile: data })
+    res.json({
+      message: 'Profile fetched successfully',
+      profile: data
+    })
   } catch (err) {
-    console.error('[PROFILE ERROR]', err)
-    res.status(500).json({ error: 'Server error' })
+    console.error('[PROFILE ERROR]', err.message)
+    res.status(500).json({ error: 'Something went wrong' })
   }
 }

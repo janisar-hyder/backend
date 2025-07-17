@@ -1,6 +1,5 @@
 import jwt from 'jsonwebtoken'
 import supabase from '../config/supabase.js'
-import { v4 as uuidv4 } from 'uuid'
 
 const tempUsers = new Map()
 
@@ -34,7 +33,6 @@ export const registerDetails = async (req, res) => {
     return res.status(400).json({ error: 'Passwords do not match' })
   }
 
-  // ✅ Lookup referrer by referral code (if provided)
   let referredBy = null
   if (referralCode) {
     const { data: referrer, error: referrerError } = await supabase
@@ -48,10 +46,8 @@ export const registerDetails = async (req, res) => {
     }
   }
 
-  // ✅ Generate a unique referral code
   const newReferralCode = await generateUniqueReferralCode()
 
-  // ✅ Store details temporarily with OTP
   const otp = Math.floor(100000 + Math.random() * 900000)
   tempUsers.set(email, {
     otp,
@@ -80,7 +76,6 @@ export const verifyRegisterOtp = async (req, res) => {
 
   const { firstname, lastname, password, phone, referralCode, referredBy } = record.user
 
-  // ✅ Sign up in Supabase Auth
   const { data, error } = await supabase.auth.signUp({
     email,
     password
@@ -90,7 +85,6 @@ export const verifyRegisterOtp = async (req, res) => {
     return res.status(400).json({ error: error.message })
   }
 
-  // ✅ Insert into profiles table
   const { error: profileError } = await supabase.from('profiles').insert({
     user_id: data.user.id,
     email,
@@ -98,13 +92,24 @@ export const verifyRegisterOtp = async (req, res) => {
     lastname,
     phone,
     referral_code: referralCode,
-    referred_by: referredBy, // UID of the referrer
+    referred_by: referredBy,
     user_verified: true,
-    kyc: false
+    kyc: false,
+    account_balance: 0,
+    roi_balance: 0,
+    referral_earnings: 0,
+    referral_no: 0,
+    plan_bought: null
   })
 
   if (profileError) {
-    return res.status(500).json({ error: 'Failed to save user profile' })
+    console.error('[PROFILE INSERT ERROR]', profileError)
+    return res.status(500).json({ error: profileError.message })
+  }
+
+  // ✅ Increment referral_no of the referrer (corrected logic)
+  if (referredBy) {
+    await supabase.rpc('increment_referral_no', { ref_user_id: referredBy })
   }
 
   tempUsers.delete(email)
@@ -138,7 +143,7 @@ export const verifyLoginOtp = async (req, res) => {
   const { email, otp } = req.body
   const stored = tempUsers.get(email)
 
-  if (!stored || stored.otp !== otp) {
+  if (!stored || stored.otp !== parseInt(otp)) {
     return res.status(400).json({ error: 'Invalid or expired OTP' })
   }
 
