@@ -5,6 +5,7 @@ import authRoutes from './src/routes/auth.js'
 import profileRoutes from './src/routes/profile.js'
 import planRoutes from './src/routes/plan.js' // ✅ Import
 import referralRoutes from './src/routes/referral.js' // ✅ Import
+import adminRoutes from './src/routes/admin.js';
 
 dotenv.config()
 
@@ -17,6 +18,7 @@ app.use('/auth', authRoutes)
 app.use('/profile', profileRoutes)
 app.use('/plan', planRoutes) // ✅ Use plan route
 app.use('/referral', referralRoutes)
+app.use('/admin', adminRoutes); // <--- important
 
 const PORT = process.env.PORT || 3000
 app.listen(PORT, () => {
