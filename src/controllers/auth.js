@@ -1,190 +1,497 @@
-import jwt from 'jsonwebtoken'
-import supabase from '../config/supabase.js'
+import dotenv from 'dotenv';
+dotenv.config();
+import { createClient } from '@supabase/supabase-js';
+import bcrypt from 'bcryptjs';
+import supabaseAdmin from '../config/supabaseAdmin.js';
+const tempPasswordResets = new Map();
 
-const tempUsers = new Map()
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
+const tempRegistrationData = new Map();
+const tempLogins = new Map();
 
-// ✅ Generate a unique referral code
+// Generate unique referral code
 async function generateUniqueReferralCode(prefix = 'REF') {
-  let unique = false
-  let newReferralCode
+  let unique = false;
+  let newReferralCode;
 
   while (!unique) {
-    newReferralCode = `${prefix}${Math.floor(100000 + Math.random() * 900000)}`
+    newReferralCode = `${prefix}${Math.floor(100000 + Math.random() * 900000)}`;
     const { data } = await supabase
       .from('profiles')
       .select('referral_code')
       .eq('referral_code', newReferralCode)
-      .single()
+      .single();
 
-    if (!data) unique = true
+    if (!data) unique = true;
   }
 
-  return newReferralCode
+  return newReferralCode;
 }
 
-export const registerDetails = async (req, res) => {
-  const { firstname, lastname, email, phone, password, confirmPassword, referralCode } = req.body
+// Validate referral code
+async function validateReferralCode(referralCode) {
+  if (!referralCode) return null;
 
-  if (!firstname || !lastname || !email || !password || !confirmPassword) {
-    return res.status(400).json({ error: 'All fields are required' })
+  const { data: referrer, error } = await supabase
+    .from('profiles')
+    .select('user_id')
+    .eq('referral_code', referralCode)
+    .single();
+
+  if (error || !referrer) {
+    throw new Error('Invalid referral code');
+  }
+
+  return referrer.user_id;
+}
+
+// Registration with OTP
+export const registerDetails = async (req, res) => {
+  const { firstname, lastname, email, phone, password, confirmPassword, referralCode } = req.body;
+
+  if (!email || !firstname || !lastname || !phone || !password || !confirmPassword) {
+    return res.status(400).json({ error: 'All fields are required' });
   }
 
   if (password !== confirmPassword) {
-    return res.status(400).json({ error: 'Passwords do not match' })
-  }
-
-  let referredBy = null
-  if (referralCode) {
-    const { data: referrer, error: referrerError } = await supabase
-      .from('profiles')
-      .select('user_id')
-      .eq('referral_code', referralCode)
-      .single()
-
-    if (referrer) {
-      referredBy = referrer.user_id
-    }
-  }
-
-  const newReferralCode = await generateUniqueReferralCode()
-
-  const otp = Math.floor(100000 + Math.random() * 900000)
-  tempUsers.set(email, {
-    otp,
-    user: {
-      firstname,
-      lastname,
-      email,
-      phone,
-      password,
-      referralCode: newReferralCode,
-      referredBy
-    }
-  })
-
-  console.log(`📨 OTP for registration [${email}]: ${otp}`)
-  return res.json({ message: 'OTP sent to email' })
-}
-
-export const verifyRegisterOtp = async (req, res) => {
-  const { email, otp } = req.body
-  const record = tempUsers.get(email)
-
-  if (!record || record.otp !== parseInt(otp)) {
-    return res.status(400).json({ error: 'Invalid or expired OTP' })
-  }
-
-  const { firstname, lastname, password, phone, referralCode, referredBy } = record.user
-
-  const { data, error } = await supabase.auth.signUp({
-    email,
-    password
-  })
-
-  if (error) {
-    return res.status(400).json({ error: error.message })
-  }
-
-  const { error: profileError } = await supabase.from('profiles').insert({
-    user_id: data.user.id,
-    email,
-    firstname,
-    lastname,
-    phone,
-    referral_code: referralCode,
-    referred_by: referredBy,
-    user_verified: true,
-    kyc: false,
-    account_balance: 0,
-    roi_balance: 0,
-    referral_earnings: 0,
-    referral_no: 0,
-    plan_bought: null
-  })
-
-  if (profileError) {
-    console.error('[PROFILE INSERT ERROR]', profileError)
-    return res.status(500).json({ error: profileError.message })
-  }
-
-  // ✅ Increment referral_no of the referrer (corrected logic)
-  if (referredBy) {
-    await supabase.rpc('increment_referral_no', { ref_user_id: referredBy })
-  }
-
-  tempUsers.delete(email)
-
-  return res.json({
-    message: 'User registered and verified',
-    user: data.user
-  })
-}
-
-export const loginDetails = async (req, res) => {
-  const { email, password } = req.body
-
-  const { data, error } = await supabase.auth.signInWithPassword({ email, password })
-
-  if (error) {
-    return res.status(400).json({ error: 'Invalid email or password' })
-  }
-
-  const otp = Math.floor(100000 + Math.random() * 900000)
-  const expiresAt = Date.now() + 15 * 60 * 1000
-
-  tempUsers.set(email, { otp, expiresAt, password })
-
-  console.log(`📨 OTP for login [${email}]: ${otp}`)
-
-  return res.json({ message: 'OTP sent successfully' })
-}
-
-export const verifyLoginOtp = async (req, res) => {
-  const { email, otp } = req.body
-  const stored = tempUsers.get(email)
-
-  if (!stored || stored.otp !== parseInt(otp)) {
-    return res.status(400).json({ error: 'Invalid or expired OTP' })
+    return res.status(400).json({ error: 'Passwords do not match' });
   }
 
   try {
-    const { data, error } = await supabase.auth.signInWithPassword({
-      email,
-      password: stored.password
-    })
+    // Check if email exists in profiles table
+    const { data: existingProfile } = await supabase
+      .from('profiles')
+      .select('user_id')
+      .eq('email', email)
+      .single();
 
-    if (error) {
-      console.log('[DEBUG] Login error:', error)
-      return res.status(400).json({ error: error.message })
+    if (existingProfile) {
+      return res.status(409).json({ error: 'User already exists' });
     }
 
-    tempUsers.delete(email)
+    let referredBy = null;
+    if (referralCode) {
+      try {
+        referredBy = await validateReferralCode(referralCode);
+      } catch (err) {
+        return res.status(400).json({ error: err.message });
+      }
+    }
 
-    const token = jwt.sign(
-      { id: data.user.id, email: data.user.email },
-      process.env.JWT_SECRET,
-      { expiresIn: '24h' }
-    )
+    // First create the user with password
+    const { data: signUpData, error: signUpError } = await supabase.auth.signUp({
+      email,
+      password,
+      options: {
+        data: {
+          first_name: firstname,
+          last_name: lastname,
+          phone
+        }
+      }
+    });
 
+    if (signUpError) throw signUpError;
+
+    // Store registration data temporarily (we'll use this in completeSignup)
+    tempRegistrationData.set(email, {
+      firstname,
+      lastname,
+      phone,
+      password,
+      referredBy,
+      role: 'user'
+    });
+
+    // Send OTP for verification
+    const { error: otpError } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        shouldCreateUser: false // User already created
+      }
+    });
+
+    if (otpError) throw otpError;
+
+    return res.json({ 
+      message: 'OTP sent to email for verification',
+      email
+    });
+
+  } catch (error) {
+    console.error('Registration error:', error);
+    return res.status(400).json({ 
+      error: error.message || 'Registration failed',
+      details: error 
+    });
+  }
+};
+
+export const completeSignup = async (req, res) => {
+  const { email, token } = req.body;
+
+  try {
+    const storedData = tempRegistrationData.get(email);
+    if (!storedData) {
+      throw new Error('Registration data not found or expired');
+    }
+
+    const { firstname, lastname, phone, password, referredBy, role } = storedData;
+
+    // Verify OTP
+    const { data: otpData, error: otpError } = await supabase.auth.verifyOtp({
+      email,
+      token,
+      type: 'email'
+    });
+    if (otpError) throw otpError;
+
+    const user_id = otpData.user.id;
+
+    // Generate unique referral code for new user
+    const referral_code = await generateUniqueReferralCode();
+
+    // Create profile in database
+    const { error: profileError } = await supabase.from('profiles').insert({
+      user_id,
+      email,
+      firstname,
+      lastname,
+      phone,
+      password_hash: await bcrypt.hash(password, 10),
+      referral_code,
+      referred_by: referredBy,
+      user_verified: true,
+      role: role || 'user'
+    });
+
+    if (profileError) throw profileError;
+
+    // Handle referral if applicable - Enhanced version
+    if (referredBy) {
+      try {
+        // METHOD 1: Using stored procedure (most reliable)
+        const { error: rpcError } = await supabase.rpc('increment_referral_count', {
+          referred_user_id: referredBy
+        });
+
+        if (rpcError) {
+          console.log('Falling back to direct update...');
+          
+          // METHOD 2: Direct update with atomic increment
+          const { error: updateError } = await supabase
+            .from('profiles')
+            .update({ 
+              no_of_users_referred: supabase.rpc('increment', {
+                column: 'no_of_users_referred',
+                value: 1
+              })
+            })
+            .eq('user_id', referredBy);
+
+          if (updateError) {
+            console.log('Falling back to fetch-and-update...');
+            
+            // METHOD 3: Fetch current value and update
+            const { data: referrer, error: fetchError } = await supabase
+              .from('profiles')
+              .select('no_of_users_referred')
+              .eq('user_id', referredBy)
+              .single();
+
+            if (!fetchError && referrer) {
+              const newCount = (referrer.no_of_users_referred || 0) + 1;
+              await supabase
+                .from('profiles')
+                .update({ no_of_users_referred: newCount })
+                .eq('user_id', referredBy);
+            } else {
+              console.error('Failed to fetch referrer data:', fetchError);
+            }
+          }
+        }
+      } catch (e) {
+        console.error('All referral increment methods failed:', e);
+      }
+    }
+
+    // Clean up
+    tempRegistrationData.delete(email);
+
+    return res.json({ 
+      message: 'Registration complete',
+      user_id,
+      email,
+      referral_code 
+    });
+
+  } catch (error) {
+    console.error('Complete signup error:', error);
+    return res.status(400).json({ 
+      error: error.message || 'Registration failed',
+      details: error.details 
+    });
+  }
+};
+
+// Unified login with password + OTP
+export const loginWithPasswordAndOTP = async (req, res) => {
+  const { email, password } = req.body;
+
+  try {
+    // First check in profiles table
+    let { data: profile, error: profileError } = await supabase
+      .from('profiles')
+      .select('user_id, password_hash, role')
+      .eq('email', email)
+      .single();
+
+    // If not found in profiles, check in admins table
+    if (profileError || !profile) {
+      const { data: admins, error: adminError } = await supabase
+        .from('admins')
+        .select('id, password_hash, role')
+        .eq('email', email)
+        .single();
+
+      if (adminError || !admins) {
+        return res.status(404).json({ error: 'Account not found' });
+      }
+      profile = admins;
+    }
+
+    // Verify password
+    const validPassword = await bcrypt.compare(password, profile.password_hash);
+    if (!validPassword) {
+      return res.status(401).json({ error: 'Invalid credentials' });
+    }
+
+    // Store user ID and role temporarily
+    tempLogins.set(email, {
+      userId: profile.user_id,
+      role: profile.role || 'user' // Default to 'user' if role not specified
+    });
+
+    // Send OTP
+    const { error: otpError } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        shouldCreateUser: false
+      }
+    });
+
+    if (otpError) throw otpError;
+
+    return res.json({ message: 'OTP sent to email' });
+
+  } catch (error) {
+    console.error('Login error:', error);
+    return res.status(400).json({ error: error.message });
+  }
+};
+
+export const verifyLoginOTP = async (req, res) => {
+  const { email, token } = req.body;
+
+  try {
+    // Verify OTP - this creates the session
+    const { data, error: otpError } = await supabase.auth.verifyOtp({
+      email,
+      token,
+      type: 'email'
+    });
+
+    if (otpError) throw otpError;
+
+    // Get stored user data
+    const loginData = tempLogins.get(email);
+    if (!loginData) {
+      throw new Error('Login session expired');
+    }
+
+    // Try to get profile from both tables
+    let profile = null;
+
+    // First try profiles table (using user_id)
+    const { data: userProfile, error: userError } = await supabase
+      .from('profiles')
+      .select('*')
+      .eq('user_id', loginData.userId)
+      .single();
+
+    if (!userError && userProfile) {
+      profile = userProfile;
+    } else {
+      // If not found in profiles, try admins table (using id)
+      const { data: adminProfile, error: adminError } = await supabase
+        .from('admins')
+        .select('*')
+        .eq('email', email)  // Lookup by email instead of ID
+        .single();
+
+      if (adminError || !adminProfile) {
+        console.log('Admin lookup failed for:', email);
+        throw new Error('User profile not found in either table');
+      }
+      profile = adminProfile;
+    }
+
+    tempLogins.delete(email);
+
+    // Return the session and user information
+    return res.json({
+      user: {
+        ...profile,
+        role: profile.role || loginData.role || 'user' // Default to user if no role specified
+      },
+      session: data.session
+    });
+
+  } catch (error) {
+    console.error('OTP verification error:', {
+      message: error.message,
+      email: email,
+      error: error
+    });
+    tempLogins.delete(email);
+    return res.status(400).json({ 
+      error: error.message,
+      details: 'Please try logging in again' 
+    });
+  }
+};
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+// Password reset endpoints
+export const initiatePasswordReset = async (req, res) => {
+  const { email } = req.body;
+
+  try {
+    // Check if email exists in profiles table (users only)
     const { data: profile, error: profileError } = await supabase
       .from('profiles')
-      .select('kyc')
-      .eq('user_id', data.user.id)
-      .single()
+      .select('user_id, email, user_verified')
+      .eq('email', email)
+      .single();
 
-    if (profileError) {
-      console.log('[DEBUG] Profile fetch error:', profileError.message)
+    if (profileError || !profile) {
+      return res.status(404).json({ error: 'User account not found' });
     }
 
-    return res.json({
-      message: 'Login successful',
-      token,
-      user: data.user,
-      email_verified: !!(data.user.email_confirmed_at || data.user.confirmed_at),
-      kyc: profile?.kyc || false
-    })
-  } catch (err) {
-    console.error('[DEBUG] OTP verify login error:', err)
-    return res.status(500).json({ error: 'Server error' })
+    if (!profile.user_verified) {
+      return res.status(403).json({ error: 'Account not verified. Please verify your account first.' });
+    }
+
+    // Store the email temporarily for verification
+    tempPasswordResets.set(email, {
+      userId: profile.user_id,
+      verified: false
+    });
+
+    // Send OTP
+    const { error: otpError } = await supabase.auth.signInWithOtp({
+      email,
+      options: {
+        shouldCreateUser: false
+      }
+    });
+
+    if (otpError) throw otpError;
+
+    return res.json({ message: 'OTP sent to email for password reset' });
+
+  } catch (error) {
+    console.error('Password reset initiation error:', error);
+    return res.status(400).json({ error: error.message });
   }
-}
+};
+
+export const verifyPasswordResetOTP = async (req, res) => {
+  const { email, token } = req.body;
+
+  try {
+    // Verify OTP
+    const { error: otpError } = await supabase.auth.verifyOtp({
+      email,
+      token,
+      type: 'email'
+    });
+
+    if (otpError) throw otpError;
+
+    // Get stored reset data
+    const resetData = tempPasswordResets.get(email);
+    if (!resetData) {
+      throw new Error('Password reset session expired or not found');
+    }
+
+    // Mark as verified
+    tempPasswordResets.set(email, {
+      ...resetData,
+      verified: true
+    });
+
+    return res.json({ message: 'OTP verified successfully. You can now reset your password.' });
+
+  } catch (error) {
+    console.error('Password reset OTP verification error:', error);
+    return res.status(400).json({ error: error.message });
+  }
+};
+
+export const completePasswordReset = async (req, res) => {
+  const { email, newPassword, confirmPassword } = req.body;
+
+  try {
+    // Validate passwords match
+    if (newPassword !== confirmPassword) {
+      return res.status(400).json({ error: 'Passwords do not match' });
+    }
+
+    // Check password strength if needed
+    if (newPassword.length < 8) {
+      return res.status(400).json({ error: 'Password must be at least 8 characters' });
+    }
+
+    // Get stored reset data
+    const resetData = tempPasswordResets.get(email);
+    if (!resetData || !resetData.verified) {
+      return res.status(403).json({ error: 'OTP not verified or session expired' });
+    }
+
+    // Hash new password
+    const saltRounds = 10;
+    const newPasswordHash = await bcrypt.hash(newPassword, saltRounds);
+
+    // Update password in profiles table
+    const { error: updateError } = await supabase
+      .from('profiles')
+      .update({ password_hash: newPasswordHash })
+      .eq('email', email);
+
+    if (updateError) throw updateError;
+
+    // Clean up
+    tempPasswordResets.delete(email);
+
+    return res.json({ message: 'Password updated successfully' });
+
+  } catch (error) {
+    console.error('Password reset completion error:', error);
+    return res.status(400).json({ error: error.message });
+  }
+};

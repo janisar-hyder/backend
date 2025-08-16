@@ -1,22 +1,26 @@
-import express from 'express'
+import express from 'express';
 import { 
   buyPlan,
   confirmPayment,
-  calculateRoi,
+  calculateMonthlyRoi ,
   getPlanDetails
-} from '../controllers/plan.js'
-import { verifyToken } from '../middlewares/auth.js'
+} from '../controllers/plan.js';
+import { verifyToken, verifyAdmin } from '../middlewares/auth.js';
+import { nowPaymentsWebhook } from '../controllers/payment.js';
 
-const router = express.Router()
+const router = express.Router();
 
 // Protected routes (require authentication)
-router.post('/buy', verifyToken, buyPlan)
-router.get('/my-plan', verifyToken, getPlanDetails)
+router.post('/buy', verifyToken, buyPlan);
+router.get('/my-plan', verifyToken, getPlanDetails);
 
 // Payment webhook (no auth - called by payment processor)
-router.post('/confirm-payment', confirmPayment)
+router.post('/confirm-payment', confirmPayment);
 
-// Admin endpoint for ROI calculations (protect this in production!)
-router.get('/calculate-roi', calculateRoi)
+// Add webhook endpoint
+router.post('/payment/webhook', nowPaymentsWebhook);
 
-export default router
+// Admin endpoint for ROI calculations
+router.get('/calculate-roi', verifyToken, verifyAdmin, calculateMonthlyRoi);
+
+export default router;
