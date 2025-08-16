@@ -68,8 +68,8 @@ const authLimiter = rateLimit({
 const allowedOrigins = [
   process.env.FRONTEND_URL,
   process.env.ADMIN_URL,
-  'http://localhost:3000',
-  'http://localhost:8080'
+  "https://thegoldinvest.netlify.app/",
+  "https://thegoldinvest.netlify.app/admin",
 ].filter(Boolean); // Remove any undefined values
 
 const corsOptions = {
